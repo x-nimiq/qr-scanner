@@ -10,18 +10,53 @@ export default class QrScanner {
             .catch(() => false);
     }
 
+    /* async */
+    static getCameraList() {
+        if (!navigator.mediaDevices) return Promise.resolve([]);
+
+        // note that to enumarate devices and get device labels we need explicit user permission so we ask for that.
+        return new Promise((resolve, reject) => {
+            navigator.mediaDevices.getUserMedia({ audio: false, video: true })
+                .then((stream) => {
+                    // hacky approach to close any active stream if they are
+                    // active.
+                    const closeActiveStreams = (stream) => {
+                        const tracks = stream.getVideoTracks();
+                        for (let i = 0; i < tracks.length; i += 1) {
+                            const track = tracks[i];
+                            track.enabled = false;
+                            track.stop();
+                            stream.removeTrack(track);
+                        }
+                    };
+
+                    navigator.mediaDevices.enumerateDevices()
+                    .then(devices => {
+                        closeActiveStreams(stream);
+                        resolve(devices.filter(device => device.kind === 'videoinput').map(device => ({
+                            id: device.deviceId,
+                            label: device.label
+                        })));
+                    })
+                    .catch((err) => reject(err));
+                }).catch((err) => reject(err));
+        });
+    }
+
     constructor(
         video,
         onDecode,
         canvasSizeOrOnDecodeError = this._onDecodeError,
         canvasSizeOrCalculateScanRegion = this._calculateScanRegion,
-        preferredFacingMode = 'environment'
+        preferredFacingMode = 'environment',
+        deviceId = null
     ) {
         this.$video = video;
         this.$canvas = document.createElement('canvas');
         this._onDecode = onDecode;
         this._legacyCanvasSize = QrScanner.DEFAULT_CANVAS_SIZE;
         this._preferredFacingMode = preferredFacingMode;
+        this._deviceId = deviceId;
         this._active = false;
         this._paused = false;
         this._flashOn = false;
@@ -138,8 +173,12 @@ export default class QrScanner {
         }
 
         let facingMode = this._preferredFacingMode;
-        return this._getCameraStream(facingMode, true)
+        let deviceId = this._deviceId;
+        return this._getCameraStream(facingMode, deviceId, true)
             .catch(() => {
+                if (deviceId) {
+                    return this._getCameraStream(facingMode, null, true);
+                }
                 // We (probably) don't have a camera of the requested facing mode
                 facingMode = facingMode === 'environment' ? 'user' : 'environment';
                 return this._getCameraStream(); // throws if camera is not accessible (e.g. due to not https)
@@ -180,6 +219,44 @@ export default class QrScanner {
             this.$video.srcObject = null;
             this._offTimeout = null;
         }, 300);
+    }
+
+    /* async */
+    setCamera(deviceId) {
+        if (this.$video.srcObject === null) {
+            this._deviceId = deviceId;
+            return Promise.resolve();
+        }
+
+        return new Promise((resolve, reject) => {
+            const active = this._active;
+            const paused = this._paused;
+
+            this._paused = true;
+            this.$video.pause();
+            this._offTimeout = setTimeout(() => {
+                const tracks = this.$video.srcObject ? this.$video.srcObject.getTracks() : [];
+                for (const track of tracks) {
+                    track.stop(); //  note that this will also automatically turn the flashlight off
+                }
+                this.$video.srcObject = null;
+                this._offTimeout = null;
+                this._deviceId = deviceId;
+                if (active) {
+                    this.start().then(() => {
+                        if (paused) {
+                            this.pause();
+                        }
+                        resolve();
+                    }).catch((err) => {
+                        reject(err);
+                    });
+                    return;
+                }
+                resolve();
+            }, 300);
+            this._active = false;
+        });
     }
 
     /* async */
@@ -346,19 +423,25 @@ export default class QrScanner {
         console.log(error);
     }
 
-    _getCameraStream(facingMode, exact = false) {
+    _getCameraStream(facingMode, deviceId, exact = false) {
         const constraintsToTry = [{
             width: { min: 1024 }
         }, {
             width: { min: 768 }
         }, {}];
 
-        if (facingMode) {
+        if (deviceId) {
+            if (exact) {
+                deviceId = { exact: deviceId };
+            }
+            constraintsToTry.forEach(constraint => constraint.deviceId = deviceId);
+        } else if (facingMode) {
             if (exact) {
                 facingMode = { exact: facingMode };
             }
             constraintsToTry.forEach(constraint => constraint.facingMode = facingMode);
         }
+
         return this._getMatchingCameraStream(constraintsToTry);
     }
 
